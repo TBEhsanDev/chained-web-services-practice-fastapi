@@ -3,3 +3,4 @@ __pycache__
 .idea
 Ip_Apps/Test/.pytest_cache
 Ip_Apps/Test/.coverage
+*.jsonl
