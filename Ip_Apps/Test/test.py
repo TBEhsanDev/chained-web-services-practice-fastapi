@@ -1,47 +1,69 @@
 import json
 import threading
+import time
 
+import pymongo
+import redis
 import requests
 
 lock = threading.Lock()
-json_data = {
+r = redis.Redis()
+data = {
     'student': {'age': 32, 'name': 'ali', 'grades': [14, 18]}
 }
 client_ip = {'client_ip': '127.0.0.1'}
-resp_test_with_json = json_data | client_ip
+resp_test_with_json = data | client_ip
 resp_test_empty_json = client_ip
 resp_test_empty_body = client_ip
-req_num = 2
+req_num = 200
 
 
 def check_logs_content(start, end):
     with open('../Log/log.jsonl', mode='r') as log:
-        for i in range(start + 1, end):
-            line = log.readlines()[i]
-            line_dict = json.loads(line)
-            del line_dict['time']
-            assert line_dict == json_data
+        lines = log.readlines()
+        for line in lines[start:end]:
+            line = json.loads(line)
+            del line['time']
+            assert line == data
+
+
+def check_mongodb(col, data, log_lines_num_in_db_before_req):
+    json_data = json.dumps(data)
+    items = col.find()
+    for item in items[log_lines_num_in_db_before_req + 1:]:
+        assert col.count() == log_lines_num_in_db_before_req + req_num
+        assert data["student"] == item["student"]
 
 
 def test_with_json():
-    resp_200 = 0
-    resp_502 = 0
-    check = [resp_200, resp_502]
-    th = list()
+    client = pymongo.MongoClient('mongodb://localhost:27017/')
+    db = client['ip_db']
+    col = db['ip_collection']
+    log_lines_num_in_db_before_req = col.count()
     log_lines_num_before_req = sum(1 for line in open('../Log/log.jsonl'))
+    resp_200 = 0
+    resp_429 = 0
+    resp_502 = 0
+    check = [resp_200, resp_429, resp_502]
+    th = list()
 
     def with_json():
         lock.acquire()
         try:
-            resp = requests.post(url="http://127.0.0.1/api/", json=json_data)
-            assert resp.status_code == 200
-            assert resp.json() == resp_test_with_json
-            check[0] += 1
+            resp = requests.post(url="http://127.0.0.1/api/", json=data)
+            if (resp.status_code == 200):
+                assert resp.json() == resp_test_with_json
+                check[0] += 1
+            elif (resp.status_code == 429):
+                assert resp.json()['detail'] == "Too Many Requests"
+                check[1] += 1
         except:
             assert resp.status_code == 502
-            check[1] += 1
+            check[2] += 1
+
         lock.release()
 
+    r.delete('127.0.0.1')
     for _ in range(req_num):
         t = threading.Thread(target=with_json)
         t.start()
@@ -49,8 +71,11 @@ def test_with_json():
     for t in th:
         t.join()
     log_lines_num_after_req = sum(1 for line in open('../Log/log.jsonl'))
-    if (check[0] == req_num) and (log_lines_num_after_req == log_lines_num_before_req + req_num):
-        check_logs_content(log_lines_num_before_req, log_lines_num_after_req)
+    if (check[0] == 100) and (log_lines_num_after_req == log_lines_num_before_req + 100):
+        check_logs_content(log_lines_num_before_req + 1, log_lines_num_after_req + 1)
+        time.sleep(5)
+        check_mongodb(col, data, log_lines_num_in_db_before_req)
+    r.delete('127.0.0.1')
 
 
 def test_empty_json():
@@ -64,14 +89,18 @@ def test_empty_json():
         lock.acquire()
         try:
             resp = requests.post(url="http://127.0.0.1/api/", json=dict())
-            assert resp.status_code == 200
-            assert resp.json() == resp_test_empty_json
-            check[0] += 1
+            if resp.status_code == 200:
+                assert resp.json() == resp_test_empty_json
+                check[0] += 1
+            elif (resp.status_code == 429):
+                assert resp.json()['detail'] == "Too Many Requests"
+                check[1] += 1
         except:
             assert resp.status_code == 502
-            check[1] += 1
+            check[2] += 1
         lock.release()
 
+    r.delete('127.0.0.1')
     for _ in range(req_num):
         t = threading.Thread(target=empty_json)
         t.start()
@@ -79,8 +108,9 @@ def test_empty_json():
     for t in th:
         t.join()
     log_lines_num_after_req = sum(1 for line in open('../Log/log.jsonl'))
-    if (check[0] == req_num):
-        assert log_lines_num_after_req == log_lines_num_before_req + req_num
+    if (check[0] == 100):
+        assert log_lines_num_after_req == log_lines_num_before_req + 100
+    r.delete('127.0.0.1')
 
 
 def test_empty_body():
@@ -94,14 +124,18 @@ def test_empty_body():
         lock.acquire()
         try:
             resp = requests.post(url="http://127.0.0.1/api/")
-            assert resp.status_code == 200
-            assert resp.json() == resp_test_empty_json
-            check[0] += 1
+            if resp.status_code == 200:
+                assert resp.json() == resp_test_empty_json
+                check[0] += 1
+            elif (resp.status_code == 429):
+                assert resp.json()['detail'] == "Too Many Requests"
+                check[1] += 1
         except:
             assert resp.status_code == 502
-            check[1] += 1
+            check[2] += 1
         lock.release()
 
+    r.delete('127.0.0.1')
     for _ in range(req_num):
         t = threading.Thread(target=empty_body)
         t.start()
@@ -110,7 +144,8 @@ def test_empty_body():
         t.join()
     log_lines_num_after_req = sum(1 for line in open('../Log/log.jsonl'))
     if (check[0] == req_num):
-        assert log_lines_num_after_req == log_lines_num_before_req + req_num
+        assert log_lines_num_after_req == log_lines_num_before_req + 100
+    r.delete('127.0.0.1')
 
 
 def test_get_request():
